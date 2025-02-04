@@ -115,6 +115,7 @@ jobs:
           sudo ln -rs /build/sysroot/usr/lib/arm-linux-gnueabihf/liblz4.so.1 /build/sysroot/usr/lib/arm-linux-gnueabihf/liblz4.so
           sudo mkdir -p /.cargo
           echo -e '[target.arm-unknown-linux-gnueabihf.dbus]\nrustc-link-lib = ["dbus-1", "gcrypt", "gpg-error", "lz4", "lzma", "systemd"]' | sudo tee -a /.cargo/config
+          echo -e 'fn main() {\nprintln!("cargo:rustc-link-search=/build/sysroot/lib/arm-linux-gnueabihf")\nprintln!("cargo:rustc-link-search=/build/sysroot/usr/lib/arm-linux-gnueabihf")\n}' | sudo tee -a /build.rs
       - name: Checking out sources
         uses: actions/checkout@v1
       - name: Running cargo build
