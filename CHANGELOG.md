@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- retry enabling discovery several times before exiting ([#1228])
+
+### Changed
+- Credential caching has been re-enabled. ([#1214])
+
+### Fixed
+- alsa mixer: volume calculation has been fixed ([#1229])
+
+[#1214]: https://github.com/Spotifyd/spotifyd/pull/1214
+[#1229]: https://github.com/Spotifyd/spotifyd/pull/1229
+[#1228]: https://github.com/Spotifyd/spotifyd/pull/1228
+
 ## [0.3.5]
 
 We now have a [project website](https://spotifyd.rs) (thanks @slondr!) and a [matrix room](https://matrix.to/#/#spotifyd:matrix.org).

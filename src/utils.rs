@@ -1,7 +1,12 @@
 use log::trace;
 use std::env;
 
-#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "linux",
+    target_os = "openbsd",
+    target_os = "android"
+))]
 fn get_shell_ffi() -> Option<String> {
     use libc::{geteuid, getpwuid_r};
     use std::{ffi::CStr, mem, ptr};
@@ -63,6 +68,11 @@ fn get_shell_ffi() -> Option<String> {
     }
 
     None
+}
+
+#[cfg(target_os = "windows")]
+fn get_shell_ffi() -> Option<String> {
+    Some(String::from("cmd"))
 }
 
 pub(crate) fn get_shell() -> Option<String> {

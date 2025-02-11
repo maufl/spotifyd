@@ -5,16 +5,15 @@ use crate::{
 };
 use color_eyre::Report;
 use gethostname::gethostname;
-use librespot_core::{
-    cache::Cache, config::DeviceType as LSDeviceType, config::SessionConfig, version,
-};
-use librespot_playback::config::{
-    AudioFormat as LSAudioFormat, Bitrate as LSBitrate, PlayerConfig,
+use librespot_core::{cache::Cache, config::DeviceType as LSDeviceType, config::SessionConfig};
+use librespot_playback::{
+    config::{AudioFormat as LSAudioFormat, Bitrate as LSBitrate, PlayerConfig},
+    dither::{mk_ditherer, DithererBuilder, TriangularDitherer},
 };
 use log::{error, info, warn};
 use serde::{de::Error, de::Unexpected, Deserialize, Deserializer};
 use sha1::{Digest, Sha1};
-use std::{fmt, fs, path::PathBuf, str::FromStr, string::ToString};
+use std::{fmt, fs, path::Path, path::PathBuf, str::FromStr};
 use structopt::{clap::AppSettings, StructOpt};
 use url::Url;
 
@@ -24,7 +23,9 @@ const CONFIG_FILE_NAME: &str = "spotifyd.conf";
     feature = "pulseaudio_backend",
     feature = "portaudio_backend",
     feature = "alsa_backend",
-    feature = "rodio_backend"
+    feature = "pipe_backend",
+    feature = "rodio_backend",
+    feature = "rodiojack_backend",
 )))]
 compile_error!("At least one of the backend features is required!");
 static BACKEND_VALUES: &[&str] = &[
@@ -36,6 +37,10 @@ static BACKEND_VALUES: &[&str] = &[
     "portaudio",
     #[cfg(feature = "rodio_backend")]
     "rodio",
+    #[cfg(feature = "pipe_backend")]
+    "pipe",
+    #[cfg(feature = "rodiojack_backend")]
+    "rodiojack",
 ];
 
 /// The backend used by librespot
@@ -46,10 +51,12 @@ pub enum Backend {
     PortAudio,
     PulseAudio,
     Rodio,
+    Pipe,
+    RodioJack,
 }
 
 fn default_backend() -> Backend {
-    return Backend::from_str(BACKEND_VALUES.first().unwrap()).unwrap();
+    Backend::from_str(BACKEND_VALUES.first().unwrap()).unwrap()
 }
 
 impl FromStr for Backend {
@@ -61,18 +68,22 @@ impl FromStr for Backend {
             "portaudio" => Ok(Backend::PortAudio),
             "pulseaudio" => Ok(Backend::PulseAudio),
             "rodio" => Ok(Backend::Rodio),
+            "pipe" => Ok(Backend::Pipe),
+            "rodiojack" => Ok(Backend::RodioJack),
             _ => unreachable!(),
         }
     }
 }
 
-impl ToString for Backend {
-    fn to_string(&self) -> String {
+impl fmt::Display for Backend {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Backend::Alsa => "alsa".to_string(),
-            Backend::PortAudio => "portaudio".to_string(),
-            Backend::PulseAudio => "pulseaudio".to_string(),
-            Backend::Rodio => "rodio".to_string(),
+            Backend::Alsa => write!(f, "alsa"),
+            Backend::PortAudio => write!(f, "portaudio"),
+            Backend::PulseAudio => write!(f, "pulseaudio"),
+            Backend::Rodio => write!(f, "rodio"),
+            Backend::Pipe => write!(f, "pipe"),
+            Backend::RodioJack => write!(f, "rodiojack"),
         }
     }
 }
@@ -119,24 +130,42 @@ static DEVICETYPE_VALUES: &[&str] = &[
     "avr",
     "stb",
     "audiodongle",
+    "gameconsole",
+    "castaudio",
+    "castvideo",
+    "automobile",
+    "smartwatch",
+    "chromebook",
+    "carthing",
+    "homething",
 ];
 
 // Spotify's device type (copied from it's config.rs)
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, StructOpt)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceType {
-    Unknown = 0,
-    Computer = 1,
-    Tablet = 2,
-    Smartphone = 3,
-    Speaker = 4,
+    Unknown,
+    Computer,
+    Tablet,
+    Smartphone,
+    Speaker,
     #[serde(rename = "t_v")]
-    Tv = 5,
+    Tv,
     #[serde(rename = "a_v_r")]
-    Avr = 6,
+    Avr,
     #[serde(rename = "s_t_b")]
-    Stb = 7,
-    AudioDongle = 8,
+    Stb,
+    AudioDongle,
+    GameConsole,
+    CastAudio,
+    CastVideo,
+    Automobile,
+    Smartwatch,
+    Chromebook,
+    UnknownSpotify,
+    CarThing,
+    Observer,
+    HomeThing,
 }
 
 impl From<LSDeviceType> for DeviceType {
@@ -151,8 +180,16 @@ impl From<LSDeviceType> for DeviceType {
             LSDeviceType::Avr => DeviceType::Avr,
             LSDeviceType::Stb => DeviceType::Stb,
             LSDeviceType::AudioDongle => DeviceType::AudioDongle,
-            // TODO: Implement new LibreSpot device types in Spotifyd
-            _ => DeviceType::Unknown,
+            LSDeviceType::GameConsole => DeviceType::GameConsole,
+            LSDeviceType::CastAudio => DeviceType::CastAudio,
+            LSDeviceType::CastVideo => DeviceType::CastVideo,
+            LSDeviceType::Automobile => DeviceType::Automobile,
+            LSDeviceType::Smartwatch => DeviceType::Smartwatch,
+            LSDeviceType::Chromebook => DeviceType::Chromebook,
+            LSDeviceType::UnknownSpotify => DeviceType::UnknownSpotify,
+            LSDeviceType::CarThing => DeviceType::CarThing,
+            LSDeviceType::Observer => DeviceType::Observer,
+            LSDeviceType::HomeThing => DeviceType::HomeThing,
         }
     }
 }
@@ -169,6 +206,16 @@ impl From<&DeviceType> for LSDeviceType {
             DeviceType::Avr => LSDeviceType::Avr,
             DeviceType::Stb => LSDeviceType::Stb,
             DeviceType::AudioDongle => LSDeviceType::AudioDongle,
+            DeviceType::GameConsole => LSDeviceType::GameConsole,
+            DeviceType::CastAudio => LSDeviceType::CastAudio,
+            DeviceType::CastVideo => LSDeviceType::CastVideo,
+            DeviceType::Automobile => LSDeviceType::Automobile,
+            DeviceType::Smartwatch => LSDeviceType::Smartwatch,
+            DeviceType::Chromebook => LSDeviceType::Chromebook,
+            DeviceType::UnknownSpotify => LSDeviceType::UnknownSpotify,
+            DeviceType::CarThing => LSDeviceType::CarThing,
+            DeviceType::Observer => LSDeviceType::Observer,
+            DeviceType::HomeThing => LSDeviceType::HomeThing,
         }
     }
 }
@@ -182,10 +229,10 @@ impl FromStr for DeviceType {
     }
 }
 
-impl ToString for DeviceType {
-    fn to_string(&self) -> String {
+impl fmt::Display for DeviceType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let dt: LSDeviceType = self.into();
-        format!("{}", dt)
+        write!(f, "{dt}")
     }
 }
 
@@ -259,11 +306,11 @@ impl FromStr for DBusType {
     }
 }
 
-impl ToString for DBusType {
-    fn to_string(&self) -> String {
+impl fmt::Display for DBusType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            DBusType::Session => "session".to_string(),
-            DBusType::System => "system".to_string(),
+            DBusType::Session => write!(f, "session"),
+            DBusType::System => write!(f, "system"),
         }
     }
 }
@@ -295,14 +342,14 @@ impl FromStr for AudioFormat {
     }
 }
 
-impl ToString for AudioFormat {
-    fn to_string(&self) -> String {
+impl fmt::Display for AudioFormat {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            AudioFormat::F32 => "F32".to_string(),
-            AudioFormat::S32 => "S32".to_string(),
-            AudioFormat::S24 => "S24".to_string(),
-            AudioFormat::S24_3 => "S24_3".to_string(),
-            AudioFormat::S16 => "S16".to_string(),
+            AudioFormat::F32 => write!(f, "F32"),
+            AudioFormat::S32 => write!(f, "S32"),
+            AudioFormat::S24 => write!(f, "S24"),
+            AudioFormat::S24_3 => write!(f, "S24_3"),
+            AudioFormat::S16 => write!(f, "S16"),
         }
     }
 }
@@ -437,7 +484,7 @@ pub struct SharedConfigValues {
     #[serde(alias = "volume-control")]
     volume_controller: Option<VolumeController>,
 
-    /// The audio device
+    /// The audio device (or file handle if using pipe backend)
     #[structopt(long, value_name = "string")]
     device: Option<String>,
 
@@ -655,16 +702,19 @@ impl SharedConfigValues {
 
 pub(crate) fn get_config_file() -> Option<PathBuf> {
     let etc_conf = format!("/etc/{}", CONFIG_FILE_NAME);
-    let xdg_dirs = xdg::BaseDirectories::with_prefix("spotifyd").ok()?;
-    xdg_dirs.find_config_file(CONFIG_FILE_NAME).or_else(|| {
-        fs::metadata(&*etc_conf).ok().and_then(|meta| {
-            if meta.is_file() {
-                Some(etc_conf.into())
-            } else {
-                None
-            }
-        })
-    })
+    let dirs = directories::BaseDirs::new()?;
+    let mut path = dirs.config_dir().to_path_buf();
+    path.push("spotifyd");
+    path.push(CONFIG_FILE_NAME);
+
+    if path.exists() {
+        Some(path)
+    } else if Path::new(&etc_conf).exists() {
+        let path: PathBuf = etc_conf.into();
+        Some(path)
+    } else {
+        None
+    }
 }
 
 fn device_id(name: &str) -> String {
@@ -693,11 +743,11 @@ pub(crate) struct SpotifydConfig {
     pub(crate) player_config: PlayerConfig,
     pub(crate) session_config: SessionConfig,
     pub(crate) onevent: Option<String>,
+    #[allow(unused)]
     pub(crate) pid: Option<String>,
     pub(crate) shell: String,
     pub(crate) zeroconf_port: Option<u16>,
     pub(crate) device_type: String,
-    pub(crate) autoplay: bool,
 }
 
 pub(crate) fn get_internal_config(config: CliConfig) -> SpotifydConfig {
@@ -825,6 +875,14 @@ pub(crate) fn get_internal_config(config: CliConfig) -> SpotifydConfig {
         None => info!("No proxy specified"),
     }
 
+    // choose default ditherer the same way librespot does
+    let ditherer: Option<DithererBuilder> = match audio_format {
+        LSAudioFormat::S16 | LSAudioFormat::S24 | LSAudioFormat::S24_3 => {
+            Some(mk_ditherer::<TriangularDitherer>)
+        }
+        _ => None,
+    };
+
     // TODO: when we were on librespot 0.1.5, all PlayerConfig values were available in the
     //  Spotifyd config. The upgrade to librespot 0.2.0 introduces new config variables, and we
     //  should consider adding them to Spotifyd's config system.
@@ -833,6 +891,7 @@ pub(crate) fn get_internal_config(config: CliConfig) -> SpotifydConfig {
         normalisation: config.shared_config.volume_normalisation,
         normalisation_pregain_db: normalisation_pregain,
         gapless: true,
+        ditherer,
         ..Default::default()
     };
 
@@ -853,17 +912,17 @@ pub(crate) fn get_internal_config(config: CliConfig) -> SpotifydConfig {
         device_name,
         player_config: pc,
         session_config: SessionConfig {
-            user_agent: version::VERSION_STRING.to_string(),
+            autoplay: Some(autoplay),
             device_id,
             proxy: proxy_url,
             ap_port: Some(443),
+            ..Default::default()
         },
         onevent: config.shared_config.on_song_change_hook,
         pid,
         shell,
         zeroconf_port: config.shared_config.zeroconf_port,
         device_type,
-        autoplay,
     }
 }
 
